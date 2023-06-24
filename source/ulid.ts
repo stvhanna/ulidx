@@ -1,11 +1,12 @@
+import crypto from "node:crypto";
 import { Layerr } from "layerr";
-import { PRNG, ULID, ULIDFactory } from "./types";
+import { PRNG, ULID, ULIDFactory } from "./types.js";
 
 // These values should NEVER change. The values are precisely for
 // generating ULIDs.
 const ENCODING = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford's Base32
-const ENCODING_LEN = ENCODING.length;
-const TIME_MAX = Math.pow(2, 48) - 1;
+const ENCODING_LEN = 32; // from ENCODING.length;
+const TIME_MAX = 281474976710655; // from Math.pow(2, 48) - 1;
 const TIME_LEN = 10;
 const RANDOM_LEN = 16;
 
@@ -27,6 +28,7 @@ export function decodeTime(id: string): number {
     }
     const time = id
         .substr(0, TIME_LEN)
+        .toUpperCase()
         .split("")
         .reverse()
         .reduce((carry, char, index) => {
@@ -60,20 +62,19 @@ export function decodeTime(id: string): number {
 
 export function detectPRNG(root?: any): PRNG {
     const rootLookup = root || detectRoot();
-    const webCrypto =
+    const globalCrypto =
         (rootLookup && (rootLookup.crypto || rootLookup.msCrypto)) ||
         (typeof crypto !== "undefined" ? crypto : null);
-    if (webCrypto) {
+    if (typeof globalCrypto?.getRandomValues === "function") {
         return () => {
             const buffer = new Uint8Array(1);
-            webCrypto.getRandomValues(buffer);
+            globalCrypto.getRandomValues(buffer);
             return buffer[0] / 0xff;
         };
-    } else {
-        try {
-            const nodeCrypto = require("crypto");
-            return () => nodeCrypto.randomBytes(1).readUInt8() / 0xff;
-        } catch (e) {}
+    } else if (typeof globalCrypto?.randomBytes === "function") {
+        return () => globalCrypto.randomBytes(1).readUInt8() / 0xff;
+    } else if (crypto?.randomBytes) {
+        return () => crypto.randomBytes(1).readUInt8() / 0xff;
     }
     throw new Layerr(
         {
@@ -90,6 +91,12 @@ function detectRoot(): any {
     if (inWebWorker()) return self;
     if (typeof window !== "undefined") {
         return window;
+    }
+    if (typeof global !== "undefined") {
+        return global;
+    }
+    if (typeof globalThis !== "undefined") {
+        return globalThis;
     }
     return null;
 }
@@ -154,6 +161,17 @@ export function encodeTime(now: number, len: number): string {
     return str;
 }
 
+/**
+ * Fix a ULID's Base32 encoding -
+ * i and l (case-insensitive) will be treated as 1 and o (case-insensitive) will be treated as 0.
+ * hyphens are ignored during decoding.
+ * @param id
+ * @returns The cleaned up ULID
+ */
+export function fixULIDBase32(id: string): string {
+    return id.replace(/i/gi, "1").replace(/l/gi, "1").replace(/o/gi, "0").replace(/-/g, "");
+}
+
 export function incrementBase32(str: string): string {
     let done: string = undefined,
         index = str.length,
@@ -198,6 +216,17 @@ export function incrementBase32(str: string): string {
 function inWebWorker(): boolean {
     // @ts-ignore
     return typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+}
+
+export function isValid(id: string): boolean {
+    return (
+        typeof id === "string" &&
+        id.length === TIME_LEN + RANDOM_LEN &&
+        id
+            .toUpperCase()
+            .split("")
+            .every(char => ENCODING.indexOf(char) !== -1)
+    );
 }
 
 export function monotonicFactory(prng?: PRNG): ULIDFactory {
